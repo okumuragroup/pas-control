@@ -1,0 +1,11 @@
+name: pas
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.8
+  - numpy
+  - pylablib
+  - pyvisa
+  - scipy
+prefix: C:\Users\Greg\anaconda3\envs\pas

@@ -1,3 +1,4 @@
+import time
 from ctypes import *
 
 import numpy as np
@@ -7,12 +8,14 @@ DWORD uint32
 BOOL int32 (1 true 0 false)
 WORD uint16
 BYTE uint8
-
 """
 BOOL = c_int32
 DWORD = c_uint32
 WORD = c_uint16
 BYTE = c_uint8
+
+class VCSError(Exception):
+    pass
 
 class MaxonMotor:
 
@@ -21,21 +24,23 @@ class MaxonMotor:
         ## Maxon documentation says EposCmd uses __stdcall convention, so using WinDLL.
         self._nodeid = None
         self._VCS = WinDLL(path_to_dll)
-        self.connect_vi()
-        self._last_stored_position = self.read_stored_position()
+        self.connect()
+        ## Read calibration constants from motor EPROM
         self._calc_parameters = self.read_calc_parameters()
-        self._position = self.read_actual_position()
-
-        #home_pos = self._GetObject(0x2081, 0, 4)
-
-        #print(home_pos)
-
+        ## Check to make sure reading home position and position relative to home is working
+        self._last_stored_position = self.read_stored_position()
+        motor_rel_position = self.read_position_rel_to_home()
+        if motor_rel_position != 0:
+            print(f"Maybe something wrong here. Motor position relative to home is not 0, but {motor_rel_position}.")
 
     def __del__(self) -> None:
         print("Closing connection to motor.")
         self._CloseDevice()
 
-    def connect_vi(self):
+    def connect(self):
+        """
+        Connects to motor and puts the motor in well-defined initial state.
+        """
         self._handle = self._OpenDevice()
         self._SetProtocolStackSettings()
         self._nodeid = self._GetNodeId()
@@ -57,12 +62,19 @@ class MaxonMotor:
                 'deceleration': 20000,
             }
             self._SetPositionProfile(**default_position_profile)
-    
+
     def read_stored_position(self):
+        """
+        Reads motor home position from motor EPROM.
+        """
         return self._GetObject(0x2081, 0, 4, c_int32).value
-    
+
     def read_calc_parameters(self):
-        
+        """
+        Reads calibration constants from motor EPROM. These constants relate the absolute position of
+        the motor to the wavelength via a quadratic A*(position**2) + B*position + C. Also reads constants
+        storing minimum and maximum wavelength.
+        """
         A = self._GetObject(0x200C, 1, 4, c_int32).value
         B = self._GetObject(0x200C, 2, 4, c_int32).value
         C = self._GetObject(0x200C, 3, 4, c_int32).value
@@ -77,17 +89,21 @@ class MaxonMotor:
             'max_wavelength': max_wavelength,
         }
         return calc_parameters
-    
-    def read_actual_position(self):
+
+    def read_position_rel_to_home(self):
+        """
+        Reads motor's reported position, relative to its home position.
+        """
         return self._GetPositionIs()
-    
+
     def position_to_wavelength(self, abs_position):
+        ""
         A = self._calc_parameters['A']
         B = self._calc_parameters['B']
         C = self._calc_parameters['C']
         wavelength = A*(abs_position**2) + B*abs_position + C
         return wavelength
-    
+
     def wavelength_to_position(self, wavelength):
         A = self._calc_parameters['A']
         B = self._calc_parameters['B']
@@ -105,21 +121,71 @@ class MaxonMotor:
             return part1 + part2
         else:
             return part1 - part2
-        
 
+    def go_to_wavelength(self, wavelength):      
+        min = self._calc_parameters['min_wavelength']
+        max = self._calc_parameters['max_wavlength']
+        if wavelength < min or wavelength > max:
+            raise ValueError("Wavelength {wavelength} out of range. Min: {min}, Max: {max}.")
+        stored_position = self.read_stored_position()
+        target_position = self.wavelength_to_position(wavelength)
+        diff_position = target_position - stored_position
 
+        def write_final_position():
+            cur_rel_pos = self.read_position_rel_to_home()
+            cur_final_pos = stored_position + cur_rel_pos
+            try:
+                self._write_home_pos(cur_final_pos)
+            except VCSError as exc:
+                print(f"Failed to correctly set home position. This could leave motor in undefined state. Home position should be set to {cur_final_pos}")
+                raise exc
 
-    
+        if diff_position < 0:
+            hysteresis_offset = 10000
+            try:
+                self._move(diff_position-hysteresis_offset)
+            except VCSError as exc:
+                write_final_position()
+                raise exc
+            try:
+                self._move(hysteresis_offset)
+            except VCSError as exc:
+                write_final_position()
+                raise exc
+        else:
+            try:
+                self._move(diff_position)
+            except VCSError as exc:
+                write_final_position()
+                raise exc
+                
+        write_final_position()
+
+    def _move(self, rel_position):
+        """
+        Moves to position relative to previous position.
+        """
+        self._EnableState()
+        try:
+            self._MoveToPosition(rel_position, absolute=False, immediately=True)
+            while True:
+                target_reached = self._GetMovementState()
+                if target_reached:
+                    break
+                time.sleep(0.25)
+        except VCSError as exc:
+            self._SetDisableState()
+            raise exc
+        self._SetDisableState()
+
+    def _write_home_pos(self, abs_position):
+        self._SetObject(0x2081, 4, c_int32(abs_position), 4)
 
     ####################################################################################
     ##                      INTERFACE TO EposCmd64.dll below.                         ##
     ##                              Not for direct use.                               ##
     ####################################################################################
 
-
-
-
-        
     def _OpenDevice(self) -> c_void_p:
         """
         C function signature:
@@ -145,10 +211,10 @@ class MaxonMotor:
             if error_out.value == 0x10000008:
                 continue
             elif error_out.value != 0:
-                raise RuntimeError(f"Failed to open device and acquire handle with error code {hex(error_out.value)}.")
+                raise VCSError(f"Failed to open device and acquire handle with error code {hex(error_out.value)}.")
             print(f"Connected on port {portname.decode()}")
             return handle
-        raise RuntimeError("Failed to find port for Maxon motor device (tried USB0-USB9).")
+        raise VCSError("Failed to find port for Maxon motor device (tried USB0-USB9).")
 
     def _CloseDevice(self) -> None:
         """
@@ -165,7 +231,7 @@ class MaxonMotor:
         success_flag = CloseDevice(self._handle, byref(error_out))
 
         if success_flag == 0:
-            raise RuntimeError(f"Failed to close device with error code {hex(error_out.value)}")
+            raise VCSError(f"Failed to close device with error code {hex(error_out.value)}")
 
     def _GetObject(self, object_index, object_subindex, NbOfBytesToRead, type=None, nodeid=None):
         """
@@ -194,12 +260,12 @@ class MaxonMotor:
                         DWORD(NbOfBytesToRead), num_bytes_actually_read, error_out)
         
         if res == 0:
-            raise RuntimeError(f"Failed to get object at object_index {hex(object_index)}, subindex {object_subindex} with err: {hex(error_out.value)}.")
+            raise VCSError(f"Failed to get object at object_index {hex(object_index)}, subindex {object_subindex} with err: {hex(error_out.value)}.")
         if type:
             return cast(returned_data, POINTER(type)).contents
         else:
             return returned_data
-    
+
     def _SetObject(self, object_index, object_subindex, data, NbOfBytesToWrite):
         """
         C function signature:
@@ -220,11 +286,11 @@ class MaxonMotor:
                   byref(num_bytes_written), byref(error_out))
         
         if num_bytes_written.value != NbOfBytesToWrite:
-            raise RuntimeError(f"Didn't write the correct # of bytes. Expected to write {NbOfBytesToWrite}, wrote {num_bytes_written.value}.")
+            raise VCSError(f"Didn't write the correct # of bytes. Expected to write {NbOfBytesToWrite}, wrote {num_bytes_written.value}.")
         
         if res == 0:
-            raise RuntimeError(f"Failed to set object index {hex(object_index)}, subindex {object_subindex} with err: {hex(error_out.value)}")
-    
+            raise VCSError(f"Failed to set object index {hex(object_index)}, subindex {object_subindex} with err: {hex(error_out.value)}")
+
     def _SetProtocolStackSettings(self) -> None:
         """
         BOOL VCS_SetProtocolStackSettings(HANDLE KeyHandle, DWORD Baudrate, DWORD Timeout,
@@ -241,12 +307,12 @@ class MaxonMotor:
         res = SetProtocolStackSettings(self._handle, baudrate, timeout, error_out)
 
         if res == 0:
-            raise RuntimeError(f"Failed to set baudrate and timeout in initialization. Err info: {hex(error_out.value)}")
+            raise VCSError(f"Failed to set baudrate and timeout in initialization. Err info: {hex(error_out.value)}")
     
     def _GetNodeId(self):
         return self._GetObject(0x2000, 0, 2, type=WORD, nodeid=0)
         #return cast(nodeid, POINTER(WORD)).contents
-    
+
     def _GetEnableState(self):
         ## Incomplete
         """
@@ -261,15 +327,15 @@ class MaxonMotor:
         res = GetEnableState(self._handle, self._nodeid, byref(isenabled), byref(error_out))
 
         if res == 0:
-            raise RuntimeError(f"Failed to get enable state with err: {hex(error_out.value)}")
+            raise VCSError(f"Failed to get enable state with err: {hex(error_out.value)}")
         
         if isenabled.value == 1:
             return True
         elif isenabled.value == 0:
             return False
         else:
-            raise RuntimeError(f"Bad return value from GetEnableState. Returned {isenabled.value}, expected 0 or 1.")
-    
+            raise VCSError(f"Bad return value from GetEnableState. Returned {isenabled.value}, expected 0 or 1.")
+
     def _SetDisableState(self):
         fun = self._VCS.VCS_SetDisableState
         fun.restype = BOOL
@@ -277,8 +343,8 @@ class MaxonMotor:
         error_out = DWORD(0)
         res = fun(self._handle, self._nodeid, byref(DWORD))
         if res == 0:
-            raise RuntimeError(f"Failed to set device state to disabled with err: {hex(error_out.value)}")
-    
+            raise VCSError(f"Failed to set device state to disabled with err: {hex(error_out.value)}")
+
     # def _SetEncoderParameter(self):
     #     """
     #     The original LabView code used the VCS_SetEncoderParameter function which appears to no longer be documented.
@@ -295,7 +361,7 @@ class MaxonMotor:
     #     position_sensor_type = WORD(4)
     #     res = fun(self._handle, self._nodeid, counts, position_sensor_type, byref(error_out))
     #     if res == 0:
-    #         raise RuntimeError(f"Failed to set encoder parameters with err: {hex(error_out.value)}")
+    #         raise VCSError(f"Failed to set encoder parameters with err: {hex(error_out.value)}")
 
     def _SetEncoderParameter(self):
         """
@@ -307,11 +373,11 @@ class MaxonMotor:
         position_sensor_type = WORD(4)
         try:
             self._SetObject(0x2210, 1, counts, 4)
-        except RuntimeError as exc:
-            raise RuntimeError("Failed to set # of pulses/turn") from exc
+        except VCSError as exc:
+            raise VCSError("Failed to set # of pulses/turn") from exc
         try:
             self._SetObject(0x2210, 2, position_sensor_type, 2)
-        except RuntimeError as exc:
+        except VCSError as exc:
             """
             The original LabView code errors with 0x06090300 (value out of range), and simply ignored the error.
             This implementation is able to distinguish that it is in fact the position_sensor_type value
@@ -319,7 +385,7 @@ class MaxonMotor:
             but ignore the resulting error.
             """
             pass
-        
+
     def _ClearFault(self) -> None:
         """
         BOOL VCS_ClearFault(HANDLE KeyHandle, WORD NodeId, DWORD* pErrorCode)
@@ -331,8 +397,8 @@ class MaxonMotor:
         res = ClearFault(self._handle, self._nodeid, byref(error_out))
         
         if res == 0:
-            raise RuntimeError(f"Failed to clear faults with err: {hex(error_out.value)}")
-    
+            raise VCSError(f"Failed to clear faults with err: {hex(error_out.value)}")
+
     def _GetOperationMode(self):
         """
         BOOL VCS_GetOperationMode(HANDLE KeyHandle, WORD NodeId, __int8* pMode, DWORD* pErrorCode)
@@ -348,7 +414,7 @@ class MaxonMotor:
         error_out = DWORD(0)
         res = fun(self._handle, self._nodeid, byref(operation_mode), byref(error_out))
         if res == 0:
-            raise RuntimeError(f"Failed to get motor operation mode with err: {hex(error_out.value)}")
+            raise VCSError(f"Failed to get motor operation mode with err: {hex(error_out.value)}")
         
         return operation_mode
 
@@ -363,8 +429,8 @@ class MaxonMotor:
         error_out = DWORD(0)
         res = fun(self._handle, self._nodeid, BYTE(mode), byref(error_out))
         if res == 0:
-            raise RuntimeError(f"Failed to set operation mode to {mode} with error code: {hex(error_out.value)}")
-    
+            raise VCSError(f"Failed to set operation mode to {mode} with error code: {hex(error_out.value)}")
+
     def _GetPositionProfile(self):
         """
         BOOL VCS_GetPositionProfile(HANDLE KeyHandle, WORD NodeId, DWORD* pProfileVelocity, DWORD*
@@ -380,7 +446,7 @@ class MaxonMotor:
         res = fun(self._handle, self._nodeid, byref(profile_velocity), byref(profile_acceleration),
                   byref(profile_deceleration), byref(error_out))
         if res == 0:
-            raise RuntimeError(f"Failed to get position profile with error code: {hex(error_out.value)}")
+            raise VCSError(f"Failed to get position profile with error code: {hex(error_out.value)}")
 
         result_dict = {
             'velocity': profile_velocity.value,
@@ -389,7 +455,7 @@ class MaxonMotor:
         }
 
         return result_dict
-    
+
     def _SetPositionProfile(self, velocity=3000, acceleration=20000, deceleration=20000):
         """
         BOOL VCS_SetPositionProfile(HANDLE KeyHandle, WORD NodeId, DWORD ProfileVelocity, DWORD
@@ -401,8 +467,8 @@ class MaxonMotor:
         error_out = DWORD(0)
         res = fun(self._handle, self._nodeid, DWORD(velocity), DWORD(acceleration), DWORD(deceleration), byref(error_out))
         if res == 0:
-            raise RuntimeError(f"Failed to set position profile with error code: {hex(error_out.value)}.")
-    
+            raise VCSError(f"Failed to set position profile with error code: {hex(error_out.value)}.")
+
     def _GetPositionIs(self):
         """
         BOOL VCS_GetPositionIs(HANDLE KeyHandle, WORD NodeId, long* pPositionIs, DWORD*
@@ -415,8 +481,41 @@ class MaxonMotor:
         error_out = DWORD(0)
         res = fun(self._handle, self._nodeid, byref(position), byref(error_out))
         if res == 0:
-            raise RuntimeError(f"Failed to get position with error code: {hex(error_out.value)}")
+            raise VCSError(f"Failed to get position with error code: {hex(error_out.value)}")
         return position.value
+
+    def _MoveToPosition(self, position, absolute=True, immediately=True):
+        """
+        BOOL VCS_MoveToPosition(HANDLE KeyHandle, WORD NodeId, long TargetPosition, BOOL
+        Absolute, BOOL Immediately, DWORD* pErrorCode)
+        """
+        fun = self._VCS.VCS_MoveToPosition
+        fun.restype = BOOL
+        fun.argtypes = [c_void_p, WORD, c_long, BOOL, BOOL, POINTER(DWORD)]
+        error_out = DWORD(0)
+        position_param = c_long(position)
+        absolute_param = BOOL(1) if absolute else BOOL(0)
+        immediately_param = BOOL(1) if immediately else BOOL(0)
+        res = fun(self._handle, self._nodeid, position_param, absolute_param, immediately_param, byref(error_out))
+        if res == 0:
+            raise VCSError(f"Failed to move to position with error code: {hex(error_out.value)}")
+
+    def _GetMovementState(self) -> bool:
+        """
+        BOOL VCS_GetMovementState(HANDLE KeyHandle, WORD NodeId, BOOL* pTargetReached, DWORD*
+        pErrorCode)
+        """
+        fun = self._VCS.VCS_GetMovementState
+        fun.restype = BOOL
+        fun.argtypes = [c_void_p, WORD, POINTER(BOOL), POINTER(DWORD)]
+        target_reached = BOOL(0)
+        error_out = DWORD(0)
+        res = fun(self._handle, self._nodeid, byref(target_reached), byref(error_out))
+        if res == 0:
+            raise VCSError(f"Failed to get movement state with error code: {hex(error_out.value)}")
+        return True if target_reached == 1 else False
+        
+
 
     
 def main():

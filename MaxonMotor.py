@@ -79,7 +79,9 @@ class MaxonMotor(VCS):
         return self._GetPositionIs()
 
     def position_to_wavelength(self, abs_position):
-        ""
+        """
+        Converts absolute motor position to wavelength.
+        """
         A = self._calc_parameters['A']
         B = self._calc_parameters['B']
         C = self._calc_parameters['C']
@@ -87,6 +89,9 @@ class MaxonMotor(VCS):
         return wavelength
 
     def wavelength_to_position(self, wavelength):
+        """
+        Converts wavelength to absolute motor position.
+        """
         A = self._calc_parameters['A']
         B = self._calc_parameters['B']
         C = self._calc_parameters['C']

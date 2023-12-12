@@ -150,7 +150,6 @@ class VCS:
         #return cast(nodeid, POINTER(WORD)).contents
 
     def _GetEnableState(self):
-        ## Incomplete
         """
         BOOL VCS_GetEnableState(HANDLE KeyHandle, WORD NodeId, BOOL* pIsEnabled, DWORD*
         pErrorCode)

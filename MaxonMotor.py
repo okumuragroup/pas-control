@@ -10,7 +10,7 @@ class MaxonMotor(VCS):
         super().__init__()
         self.connect()
         ## Read calibration constants from motor EPROM
-        self._calc_parameters = self.read_calc_parameters()
+        self._calibration_parameters = self.read_calibration_parameters()
         ## Check to make sure reading home position and position relative to home is working
         self._last_stored_position = self.read_stored_position()
         motor_rel_position = self.read_position_rel_to_home()
@@ -19,7 +19,7 @@ class MaxonMotor(VCS):
         
         print(f"Last stored position: {self._last_stored_position}")
         print(f"Motor rel position: {motor_rel_position}")
-        print(f"Calc parameters: {self._calc_parameters}")
+        print(f"Calibration parameters: {self._calibration_parameters}")
         print(f"Current motor wavelength: {self.get_wavelength()}")
 
     def __del__(self) -> None:
@@ -56,7 +56,7 @@ class MaxonMotor(VCS):
         """
         return self._GetObject(0x2081, 0, 4, c_int32).value
 
-    def read_calc_parameters(self):
+    def read_calibration_parameters(self):
         """
         Reads calibration constants from motor EPROM. These constants relate the absolute position of
         the motor to the wavelength via a quadratic A*(position**2) + B*position + C. Also reads constants
@@ -105,9 +105,9 @@ class MaxonMotor(VCS):
         """
         Converts absolute motor position to wavelength.
         """
-        A = self._calc_parameters['A']
-        B = self._calc_parameters['B']
-        C = self._calc_parameters['C']
+        A = self._calibration_parameters['A']
+        B = self._calibration_parameters['B']
+        C = self._calibration_parameters['C']
         wavelength = A*(abs_position**2) + B*abs_position + C
         return wavelength
 
@@ -115,9 +115,9 @@ class MaxonMotor(VCS):
         """
         Converts wavelength to absolute motor position.
         """
-        A = self._calc_parameters['A']
-        B = self._calc_parameters['B']
-        C = self._calc_parameters['C']
+        A = self._calibration_parameters['A']
+        B = self._calibration_parameters['B']
+        C = self._calibration_parameters['C']
         ## Determine whether graph is descending or ascending between 0 and 5000
         if self.position_to_wavelength(5000) - self.position_to_wavelength(0) > 0:
             ascending = True
@@ -142,8 +142,8 @@ class MaxonMotor(VCS):
         #    return part1 - part2
 
     def go_to_wavelength(self, wavelength):      
-        min = self._calc_parameters['min_wavelength']
-        max = self._calc_parameters['max_wavlength']
+        min = self._calibration_parameters['min_wavelength']
+        max = self._calibration_parameters['max_wavlength']
         if wavelength < min or wavelength > max:
             raise ValueError("Wavelength {wavelength} out of range. Min: {min}, Max: {max}.")
         stored_position = self.read_stored_position()
@@ -199,7 +199,7 @@ class MaxonMotor(VCS):
 
     def _write_home_pos(self, abs_position):
         self._SetObject(0x2081, 4, c_int32(abs_position), 4)
-    
+
     def get_wavelength(self):
         home_pos = self.read_stored_position()
         rel_position = self.read_position_rel_to_home()

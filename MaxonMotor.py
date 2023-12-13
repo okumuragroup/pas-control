@@ -21,6 +21,8 @@ import numpy as np
 
 from VCS import VCS, VCSError
 
+DEBUG=False
+
 class MaxonMotor(VCS):
     def __init__(self) -> None:
         super().__init__()
@@ -28,15 +30,12 @@ class MaxonMotor(VCS):
         ## Read calibration constants from motor EPROM
         self._calibration_parameters = self.read_calibration_parameters()
         ## Check to make sure reading home position and position relative to home is working
-        self._last_stored_position = self.read_stored_position()
-        motor_rel_position = self.read_position_rel_to_home()
-        if motor_rel_position != 0:
-            print(f"Maybe something wrong here. Motor position relative to home is not 0, but {motor_rel_position}.")
-        
-        print(f"Last stored position: {self._last_stored_position}")
-        print(f"Motor rel position: {motor_rel_position}")
-        print(f"Calibration parameters: {self._calibration_parameters}")
-        print(f"Current motor wavelength: {self.get_wavelength()}")
+        last_stored_position = self.read_stored_position()
+        motor_rel_position = self.read_temp_motor_position()
+        if DEBUG:
+            print(f"Last stored position: {last_stored_position}")
+            print(f"Motor rel position: {motor_rel_position}")
+            print(f"Calibration parameters: {self._calibration_parameters}")
 
     def __del__(self) -> None:
         print("Closing connection to motor.")
@@ -66,12 +65,22 @@ class MaxonMotor(VCS):
             }
             self._SetPositionProfile(**default_position_profile)
 
+    def get_wavelength(self):
+        return self.position_to_wavelength(self.read_stored_position())
+    
     def read_stored_position(self):
         """
-        Reads motor home position from motor EPROM.
+        Reads stored position which corresponds to the position scale used to convert to wavelength.
         """
         return self._GetObject(0x2081, 0, 4, c_int32).value
-
+    
+    def read_temp_motor_position(self):
+        """
+        Reads motor's self-reported position. We use this value only to track how far the motor moves after a single
+        `go_to_wavelength` operation.
+        """
+        return self._GetPositionIs()
+    
     def read_calibration_parameters(self):
         """
         Reads calibration constants from motor EPROM. These constants relate the absolute position of
@@ -93,31 +102,7 @@ class MaxonMotor(VCS):
         }
         return calc_parameters
 
-    def _uint32_to_double(self, input):
-        """
-        This is the utterly insane encoding of a floating point number used by Sacher to store calibration constants
-        on the EPROM of the motor. This decoding has been verified to match results of the LabVIEW decoding.
-        The sign of the mantissa is stored in the most significant digit, followed by the mantissa (which has its radix 7
-        *decimal* places from its least significant digit), followed by the sign bit of the exponent, followed by the exponent.
-        The encoding uses 2 as the base of its exponent.
-        """
-        binstr = str(bin(input))[2:] # strip 0b
-        ndigits = len(binstr)
-        binstr = (32 - ndigits)*"0" + binstr # left pad with zeros to yield 32-bit string
-        msign = 1 if int(binstr[0]) == 0 else -1
-        mantissa = int("0b" + binstr[1:24],2) / 1000000
-        esign = 1 if int(binstr[24]) == 0 else -1
-        exponent = int("0b" + binstr[25:],2)
-        result = msign*mantissa * 2**(esign*exponent)
-        return result
-
-    def read_position_rel_to_home(self):
-        """
-        Reads motor's reported position, relative to its home position.
-        """
-        return self._GetPositionIs()
-
-    def position_to_wavelength(self, abs_position):
+    def position_to_wavelength(self, abs_position: int)-> float:
         """
         Converts absolute motor position to wavelength.
         """
@@ -127,9 +112,9 @@ class MaxonMotor(VCS):
         wavelength = A*(abs_position**2) + B*abs_position + C
         return wavelength
 
-    def wavelength_to_position(self, wavelength):
+    def wavelength_to_position(self, wavelength: float) -> int:
         """
-        Converts wavelength to absolute motor position.
+        Converts wavelength to absolute motor position (target of stored position).
         """
         A = self._calibration_parameters['A']
         B = self._calibration_parameters['B']
@@ -144,35 +129,32 @@ class MaxonMotor(VCS):
 
         ## A > 0 and ascending yields plus, inverting one should give minus, inverting both should give plus again.
         if A > 0 and ascending:
-            return part1 + part2
+            return int(part1 + part2)
         elif A > 0 and not ascending:
-            return part1 - part2
+            return int(part1 - part2)
         elif A < 0 and ascending:
-            return part1 - part2
+            return int(part1 - part2)
         elif A < 0 and not ascending:
-            return part1 + part2
-
-        #if not ((A > 0) ^ ascending):
-        #    return part1 + part2
-        #else:
-        #    return part1 - part2
+            return int(part1 + part2)
 
     def go_to_wavelength(self, wavelength):      
         min = self._calibration_parameters['min_wavelength']
-        max = self._calibration_parameters['max_wavlength']
+        max = self._calibration_parameters['max_wavelength']
         if wavelength < min or wavelength > max:
             raise ValueError("Wavelength {wavelength} out of range. Min: {min}, Max: {max}.")
+        old_temp_pos = self.read_temp_motor_position()
         stored_position = self.read_stored_position()
-        target_position = self.wavelength_to_position(wavelength)
+        target_position = int(self.wavelength_to_position(wavelength))
         diff_position = target_position - stored_position
 
         def write_final_position():
-            cur_rel_pos = self.read_position_rel_to_home()
-            cur_final_pos = stored_position + cur_rel_pos
+            cur_temp_pos = self.read_temp_motor_position()
+            shift = cur_temp_pos - old_temp_pos
+            final_stored_position = stored_position + shift
             try:
-                self._write_home_pos(cur_final_pos)
+                self._write_stored_pos(final_stored_position)
             except VCSError as exc:
-                print(f"Failed to correctly set home position. This could leave motor in undefined state. Home position should be set to {cur_final_pos}")
+                print(f"Failed to correctly set home position. This could leave motor in undefined state. Home position should be set to {final_stored_position}")
                 raise exc
 
         if diff_position < 0:
@@ -193,14 +175,14 @@ class MaxonMotor(VCS):
             except VCSError as exc:
                 write_final_position()
                 raise exc
-                
         write_final_position()
 
     def _move(self, rel_position):
         """
-        Moves to position relative to previous position.
+        Moves to position relative to previous position. Should only be used by `go_to_wavelength()` or
+        for manual adjustments of motor position. Notably, this method does not shift the stored position.
         """
-        self._EnableState()
+        self._SetEnableState()
         try:
             self._MoveToPosition(rel_position, absolute=False, immediately=True)
             while True:
@@ -213,17 +195,36 @@ class MaxonMotor(VCS):
             raise exc
         self._SetDisableState()
 
-    def _write_home_pos(self, abs_position):
-        self._SetObject(0x2081, 4, c_int32(abs_position), 4)
+    def _write_stored_pos(self, abs_position):
+        self._SetObject(0x2081, 0, c_int32(abs_position), 4)
 
-    def get_wavelength(self):
-        home_pos = self.read_stored_position()
-        rel_position = self.read_position_rel_to_home()
-        abs_position = home_pos #+ rel_position
-        return self.position_to_wavelength(abs_position)
+    def _uint32_to_double(self, input):
+        """
+        This is the utterly insane encoding of a floating point number used by Sacher to store calibration constants
+        on the EPROM of the motor. This decoding has been verified to match results of the LabVIEW decoding.
+        The sign of the mantissa is stored in the most significant digit, followed by the mantissa (which has its radix 7
+        *decimal* places from its least significant digit), followed by the sign bit of the exponent, followed by the exponent.
+        The encoding uses 2 as the base of its exponent.
+        """
+        binstr = str(bin(input))[2:] # strip 0b
+        ndigits = len(binstr)
+        binstr = (32 - ndigits)*"0" + binstr # left pad with zeros to yield 32-bit string
+        msign = 1 if int(binstr[0]) == 0 else -1
+        mantissa = int("0b" + binstr[1:24],2) / 1000000
+        esign = 1 if int(binstr[24]) == 0 else -1
+        exponent = int("0b" + binstr[25:],2)
+        result = msign*mantissa * 2**(esign*exponent)
+        return result
+    
+    def _debug_shift_home_from_wavelength(self, wavelength):
+        correct_home_position = int(self.wavelength_to_position(wavelength))
+        self._write_stored_pos(correct_home_position)
 
 def main():
     motor = MaxonMotor()
+    print(f"Initial motor wavelength: {motor.get_wavelength()}")
+    #motor.go_to_wavelength(751.78)
+    print(f"Final motor wavelength:{motor.get_wavelength()}")
 
 if __name__ == "__main__":
     main()

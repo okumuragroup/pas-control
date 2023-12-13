@@ -186,13 +186,25 @@ class VCS:
             return False
         else:
             raise VCSError(f"Bad return value from GetEnableState. Returned {isenabled.value}, expected 0 or 1.")
+    
+    def _SetEnableState(self) -> None:
+        """
+        BOOL VCS_SetEnableState(HANDLE KeyHandle, WORD NodeId, DWORD* pErrorCode)
+        """
+        fun = self._VCS.VCS_SetEnableState
+        fun.restype = BOOL
+        fun.argtypes = [c_void_p, WORD, POINTER(DWORD)]
+        error_out = DWORD(0)
+        res = fun(self._handle, self._nodeid, byref(error_out))
+        if res == 0:
+            raise VCSError(f"Failed to set device state to enabled with err: {hex(error_out.value)}")
 
     def _SetDisableState(self):
         fun = self._VCS.VCS_SetDisableState
         fun.restype = BOOL
         fun.argtypes = [c_void_p, WORD, POINTER(DWORD)]
         error_out = DWORD(0)
-        res = fun(self._handle, self._nodeid, byref(DWORD))
+        res = fun(self._handle, self._nodeid, byref(error_out))
         if res == 0:
             raise VCSError(f"Failed to set device state to disabled with err: {hex(error_out.value)}")
 
@@ -364,4 +376,4 @@ class VCS:
         res = fun(self._handle, self._nodeid, byref(target_reached), byref(error_out))
         if res == 0:
             raise VCSError(f"Failed to get movement state with error code: {hex(error_out.value)}")
-        return True if target_reached == 1 else False
+        return True if target_reached.value == 1 else False

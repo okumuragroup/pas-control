@@ -46,7 +46,7 @@ def main():
     wm = HighFinesseWavemeter()
     for i in range(20):
         print("Freq: ", wm.get_frequency().ghz)
-        print("WL:  ", wm.get_wavelength().ghz)
+        print("WL:  ", wm.get_frequency().nm)
         time.sleep(0.2)
 
 if __name__ == "__main__":

@@ -13,10 +13,18 @@
 
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
+import collections
+import threading
+import time
 
 import pyvisa
 
+from Frequency import Frequency
+from HighFinesseWSUltimate2 import HighFinesseWavemeter
 from MaxonMotor import MaxonMotor
+
+class FailedToLockLaser(Exception):
+    pass
 
 class SacherLion:
     def __init__(self, address="GPIB0::12::INSTR"):
@@ -24,6 +32,9 @@ class SacherLion:
         self._instrument = resource_manager.open_resource(address)
         self._instrument.read_termination = '\r\n'
         self._motor = MaxonMotor()
+
+        self._stop_locking = threading.Event()
+        self._is_locking = threading.Event()
 
     def identify(self):
         return self._instrument.query('*IDN?')
@@ -188,12 +199,176 @@ class SacherLion:
         """
         Returns the current piezo voltage in Volts.
         """
-        return self.query(":PIEZO:OFFSET?")
+        return float(self.query(":PIEZO:OFFSET?"))
+    
+    def lock(self,
+             setpoint: Frequency,
+             wavemeter: HighFinesseWavemeter,
+             **kwargs):
+        """
+        Locks laser using only piezo. 
 
+        Parameters
+        ----------
+        setpoint
+            Frequency desired.
+        wavemeter
+            Wavemeter object that is used to read frequency.
+        successfully_locked
+            Event that signals when lock is achieved.
+        tol
+            Tolerance for locking.
+        P
+            Tunable parameter for PI lock.
+        I
+            Tunable parameter for PI lock.
+        tau
+            Number of samples to use for integration in PI lock.
+        stable_after
+            Consider laser locked after ``stable_after`` contiguous samples where ``abs(setpoint - measured_frequency) < tol``
+        """
+        print(f"Entered locking")
+        ### Stop locking if the user accidentally forgot to stop locking
+        self.stop_locking()
+        while self._is_locking.is_set():
+            time.sleep(0.1)
+        
+        ### Reset stop locking signal in preparation for new lock
+        self._stop_locking.clear()
+
+        ### Set up new locking thread and start it
+        successfully_locked = threading.Event()
+        laser_lock_thread = threading.Thread(target=self._lock_piezo, name="wavelength_locking_thread", args=(setpoint, wavemeter, successfully_locked), kwargs=kwargs, daemon=True)
+        laser_lock_thread.start()
+        return successfully_locked
+    
+    def stop_locking(self):
+        self._stop_locking.set()
+    
+    def _lock_piezo(self,
+                   setpoint: Frequency,
+                   wavemeter: HighFinesseWavemeter,
+                   successfully_locked: threading.Event,
+                   tol: Frequency = Frequency(3e-3, 'ghz'),
+                   P: float = 1.0,
+                   I: float = 1.0,
+                   tau: int = 10,
+                   stable_after: int = 10):
+        """
+        Locks laser using only piezo. 
+
+        Parameters
+        ----------
+        setpoint
+            Frequency desired.
+        wavemeter
+            Wavemeter object that is used to read frequency.
+        successfully_locked
+            Event that signals when lock is achieved.
+        tol
+            Tolerance for locking.
+        P
+            Tunable parameter for PI lock.
+        I
+            Tunable parameter for PI lock.
+        tau
+            Number of samples to use for integration in PI lock.
+        stable_after
+            Consider laser locked after ``stable_after`` contiguous samples where ``abs(setpoint - measured_frequency) < tol``
+        """
+        print("Entered lock function...")
+        self._is_locking.set()
+        history = collections.deque(maxlen=tau)
+        ## Begin PI loop
+        counter = 0
+        ## Scale P and I to K_p and T_i
+        Kp = P * 1.5 * 0.5 ## Manual suggests ~ -1.5 GHz change / +1V piezo, empirically damping by 0.5 seems to work well
+        piezo_voltage = self.get_piezo_voltage()
+        begin_locking_time = time.time()
+        while True:
+            ## Stops locking when requested
+            if self._stop_locking.is_set():
+                self._is_locking.clear()
+                return
+            
+            if not successfully_locked.is_set():
+                current_time = time.time()
+                ### If we've tried locking for more than 30 seconds and we're not locked, give up.
+                if (current_time - begin_locking_time > 30):
+                    self.stop_locking()
+                    self._is_locking.clear()
+                    raise FailedToLockLaser()
+            
+            current_frequency = wavemeter.get_frequency()
+            err = current_frequency.ghz - setpoint.ghz # in GHz
+
+            if abs(err) < tol.ghz:
+                if not successfully_locked.is_set():
+                    counter += 1
+                    print("Succeeding...")
+            else:
+                ### Out of tolerance
+                counter = 0
+                ### If we fell out of tolerance, signal that we are no longer locked and restart our timer
+                if successfully_locked.is_set():
+                    successfully_locked.clear()
+                    begin_locking_time = time.time()
+            if counter > stable_after:
+                successfully_locked.set()
+                break
+            
+            history.append(err)
+            print(f"Setpoint (GHz): {setpoint.ghz}")
+            print(f"Current frequency (GHz): {current_frequency.ghz}")
+            print(f"Current distance from setpoint in GHz: {err}")
+            response = Kp*(err + I*(sum(history)/min(tau, len(history)))) # in V
+            #response = Kp*err
+
+            # print(f"Old piezo voltage: {piezo_voltage}")
+            #print(f"Calculated response: {response}\n")
+            # print(f"Setting new voltage to: {piezo_voltage+response}")
+            scale_counter = 0
+            while scale_counter < 6:
+                scaled_response = response*(10**-scale_counter)
+                if abs(scaled_response) > 0.1:
+                    scale_counter += 1
+                    continue
+                if abs(scaled_response) < 0.001:
+                    break
+                try:
+                    self.set_piezo_voltage(piezo_voltage + scaled_response)
+                    piezo_voltage += scaled_response
+                    break
+                except ValueError:
+                    print(f"Response {scaled_response} too big, trying smaller step.")
+                    scale_counter += 1
+                except pyvisa.errors.VisaIOError as ex:
+                    print(ex.description)
+
+            #print("We're locking...")
+            time.sleep(0.1)
+
+def test_simple_lock():
+    laser = SacherLion()
+    wavemeter = HighFinesseWavemeter()
+    try:
+        successfully_locked = laser.lock(Frequency(760.01, 'nm'), wavemeter)
+        while not successfully_locked.is_set():
+            #print("Happily doing other things....")
+            time.sleep(0.1)
+    except FailedToLockLaser:
+        print("Failed to lock laser.")
+    laser.stop_locking()
 
 
 
 def main():
+    test_simple_lock()
+
+if __name__ == "__main__":
+    main()
+
+def test_simple_functions():
     laser = SacherLion()
     print(laser.identify())
     print(f"Laser Operating Hours: {laser.working_hours()}")
@@ -203,13 +378,7 @@ def main():
     print("Setting new piezo voltage of 1.0 V")
     laser.set_piezo_voltage(1.0)
     print(f"New Piezo Voltage: {laser.get_piezo_voltage()} V")
-    laser.set_current()
+    laser.set_current()    
 
 
-
-
-
-if __name__ == "__main__":
-    main()
-
-
+    

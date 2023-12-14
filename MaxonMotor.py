@@ -21,7 +21,7 @@ import numpy as np
 
 from VCS import VCS, VCSError
 
-DEBUG=False
+DEBUG=True
 
 class MaxonMotor(VCS):
     def __init__(self) -> None:
@@ -90,9 +90,12 @@ class MaxonMotor(VCS):
         A = self._uint32_to_double(self._GetObject(0x200C, 1, 4, c_uint32).value)
         B = self._uint32_to_double(self._GetObject(0x200C, 2, 4, c_uint32).value)
         C = self._uint32_to_double(self._GetObject(0x200C, 3, 4, c_uint32).value)
-        wavelength_array = cast(self._GetObject(0x200C, 4, 4), POINTER(c_uint16))
-        min_wavelength = wavelength_array[1] / 10 # in nm
-        max_wavelength = wavelength_array[0] / 10 # in nm
+        ## Working, but we want to restrict to tigher range.
+        # wavelength_array = cast(self._GetObject(0x200C, 4, 4), POINTER(c_uint16))
+        # min_wavelength = wavelength_array[1] / 10 # in nm
+        # max_wavelength = wavelength_array[0] / 10 # in nm
+        min_wavelength = 756.5
+        max_wavelength = 781.1
         calc_parameters = {
             'A': A,
             'B': B,
@@ -223,7 +226,7 @@ class MaxonMotor(VCS):
 def main():
     motor = MaxonMotor()
     print(f"Initial motor wavelength: {motor.get_wavelength()}")
-    #motor.go_to_wavelength(751.78)
+    motor.go_to_wavelength(760.0)
     print(f"Final motor wavelength:{motor.get_wavelength()}")
 
 if __name__ == "__main__":

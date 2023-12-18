@@ -305,7 +305,6 @@ class SacherLion:
             if abs(err) < tol.ghz:
                 if not successfully_locked.is_set():
                     counter += 1
-                    print("Succeeding...")
             else:
                 ### Out of tolerance
                 counter = 0
@@ -315,7 +314,6 @@ class SacherLion:
                     begin_locking_time = time.time()
             if counter > stable_after:
                 successfully_locked.set()
-                break
             
             history.append(err)
             print(f"Setpoint (GHz): {setpoint.ghz}")

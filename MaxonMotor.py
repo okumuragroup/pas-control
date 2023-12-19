@@ -19,6 +19,7 @@ import time
 
 import numpy as np
 
+from Frequency import Frequency
 from VCS import VCS, VCSError
 
 DEBUG=True
@@ -140,7 +141,8 @@ class MaxonMotor(VCS):
         elif A < 0 and not ascending:
             return int(part1 + part2)
 
-    def go_to_wavelength(self, wavelength):      
+    def go_to_wavelength(self, freq: Frequency):
+        wavelength = freq.nm
         min = self._calibration_parameters['min_wavelength']
         max = self._calibration_parameters['max_wavelength']
         if wavelength < min or wavelength > max:

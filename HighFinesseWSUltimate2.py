@@ -1,5 +1,5 @@
 # This code is part of the Okumura Photoacoustic Spectroscopy software package.
-# Copyright (C) 2023  Greg Jones
+# Copyright (C) 2023 Greg Jones
 
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by

@@ -43,6 +43,10 @@ class Frequency:
         unit = unit.lower()
         if unit == 'ghz':
             self._ghz = input
+        elif unit == 'thz':
+            self._ghz = input * 1000
+        elif unit == 'mhz':
+            self._ghz = input / 1000
         elif unit == 'nm':
             self._ghz = self.c / input # 10^9 factors from nm and GHz cancel
         elif unit == 'cm-1':
@@ -51,15 +55,23 @@ class Frequency:
             raise ValueError("Unit argument to frequency must be one of: GHz, nm, or cm-1")
 
     @property
-    def ghz(self):
+    def ghz(self) -> float:
         return self._ghz
     
     @property
-    def nm(self):
+    def thz(self) -> float:
+        return self._ghz / 1000
+    
+    @property
+    def mhz(self) -> float:
+        return self._ghz * 1000
+    
+    @property
+    def nm(self) -> float:
         return self.c / self.ghz
     
     @property
-    def cm(self):
+    def cm(self) -> float:
         return self.ghz / (self.c * 10**(-7))
     
 

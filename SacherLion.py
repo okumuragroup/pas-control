@@ -201,6 +201,27 @@ class SacherLion:
         """
         return float(self.query(":PIEZO:OFFSET?"))
     
+    def go_to_frequency(self, freq: Frequency, wavemeter: HighFinesseWavemeter, timeout: float = 30, **kwargs):
+        """
+        Tunes laser to target frequency using motor and piezo.
+
+        Parameters
+        ----------
+        freq
+            Target frequency
+        wavemeter
+            Wavemeter object to measure actual frequency.
+        timeout
+            Maximum amount of time in seconds to wait for piezo to tune to target frequency.
+        """
+        self._motor.go_to_wavelength(freq)
+
+        kwargs['stable_after'] = 3 if 'stable_after' not in kwargs else kwargs['stable_after']
+        kwargs['tol'] = Frequency(10, 'mhz') if 'tol' not in kwargs else kwargs['tol']
+        lock = self.lock(freq, wavemeter, **kwargs)
+        lock.wait(timeout)
+        self.stop_locking()
+
     def lock(self,
              setpoint: Frequency,
              wavemeter: HighFinesseWavemeter,

@@ -24,4 +24,3 @@ dependencies:
   - pylablib
   - pyvisa
   - scipy
-prefix: C:\Users\Greg\anaconda3\envs\pas

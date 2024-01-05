@@ -29,6 +29,22 @@ from drivepy.newport.powermeter import PowerMeter
 
 
 def scan(frequencies: list[Frequency], fn: str, acoustic_freq: float, averages: int = 5, save_every: int = 5):
+    """
+    Does a simple scan over a user-provided list of frequencies.
+
+    Parameters
+    ----------
+    frequencies
+        List of frequencies to measure.
+    fn
+        Filename to save data.
+    acoustic_freq
+        Acoustic modulation frequency for AOM and lock-in amplifier
+    averages
+        How many data points to average over for each frequency.
+    save_every
+        Save data to disk every `save_every` frequencies measured.
+    """
     laser = SacherLion()
     aom = DS335()
     lockin = SR830()

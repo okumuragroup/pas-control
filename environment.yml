@@ -24,3 +24,6 @@ dependencies:
   - pylablib
   - pyvisa
   - scipy
+  - pymeasure
+  - matplotlib
+  - pyserial
